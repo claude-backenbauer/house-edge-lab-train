@@ -1,0 +1,7 @@
+# house-edge-lab has NO runtime dependencies — it uses the Python standard
+# library only (random, statistics, math, json, argparse, dataclasses).
+#
+# Tested on Python 3.10+.
+#
+# Optional, for development:
+#   pytest   # the test suite also runs under stdlib `python -m unittest`

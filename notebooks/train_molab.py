@@ -30,7 +30,9 @@ def _():
     # own), fetch the public training repo so `src/` and the dataset exist.
     _REPO = "https://github.com/claude-backenbauer/house-edge-lab-train.git"
     _DIR = "house-edge-lab-train"
-    if not os.path.exists("src") and not os.path.exists(os.path.join(_DIR, "src")):
+    if os.path.exists(os.path.join(_DIR, ".git")):
+        subprocess.run(["git", "-C", _DIR, "pull", "--ff-only"], check=False)
+    elif not os.path.exists("src"):
         subprocess.run(["git", "clone", "--depth", "1", _REPO], check=False)
     if os.path.exists(os.path.join(_DIR, "src")):
         os.chdir(_DIR)  # so data/markets.jsonl resolves

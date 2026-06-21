@@ -32,17 +32,28 @@ _TIMEOUT = 20
 _POLITE_DELAY = 0.25  # seconds between requests
 
 
-def _get_json(url: str, params: dict | None = None):
-    """Polite, read-only HTTP GET returning parsed JSON."""
+def _get_json(url: str, params: dict | None = None, retries: int = 4):
+    """Polite, read-only HTTP GET returning parsed JSON, with retries.
+
+    Retries transient network errors with backoff so a long collection run
+    isn't killed by a single blip. Raises only after all attempts fail.
+    """
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
+    if not url.lower().startswith("https://"):
+        raise ValueError("refusing non-HTTPS request")
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310 (https only)
-        if not url.lower().startswith("https://"):
-            raise ValueError("refusing non-HTTPS request")
-        data = resp.read().decode("utf-8")
-    time.sleep(_POLITE_DELAY)
-    return json.loads(data)
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310
+                data = resp.read().decode("utf-8")
+            time.sleep(_POLITE_DELAY)
+            return json.loads(data)
+        except Exception as e:  # noqa: BLE001 - transient network/JSON errors
+            last_err = e
+            time.sleep(_POLITE_DELAY * (attempt + 1) * 2)
+    raise last_err  # type: ignore[misc]
 
 
 def _ms_to_iso(ms) -> str | None:
@@ -87,11 +98,14 @@ class ManifoldCollector:
         before: str | None = None
 
         while len(out) < limit and scanned < max_scan:
-            page = _get_json(
-                f"{self.BASE}/markets",
-                {"limit": 100, "sort": "updated-time", "order": "desc",
-                 **({"before": before} if before else {})},
-            )
+            try:
+                page = _get_json(
+                    f"{self.BASE}/markets",
+                    {"limit": 100, "sort": "updated-time", "order": "desc",
+                     **({"before": before} if before else {})},
+                )
+            except Exception:  # noqa: BLE001 - keep whatever we've gathered
+                break
             if not page:
                 break
             for m in page:

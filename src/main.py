@@ -241,8 +241,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="house-edge-lab",
         description=(
-            "Prediction-market design simulation lab. Offline only — never "
-            "places real bets or touches real-money systems."
+            "Prediction-market design simulation lab. Read-only & simulation "
+            "only — reads public market data but never places real bets, moves "
+            "money, or touches a real-money trading system."
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)

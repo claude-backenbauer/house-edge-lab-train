@@ -219,20 +219,18 @@ class PolymarketCollector:
     CLOB = "https://clob.polymarket.com"  # price-history timeseries lives here
     name = "polymarket"
 
-    # Gamma rejects offsets past a few thousand (HTTP 422). Stay safely under it.
-    _MAX_OFFSET = 2000
     _PAGE = 100
 
-    def collect(self, limit: int = 50, max_scan: int = 2000,
+    def collect(self, limit: int = 50, max_scan: int = 20000,
                 min_volume: float = 1000.0,
                 with_history: bool = False) -> list[TrainingExample]:
         """Collect closed binary markets, highest-volume first.
 
-        Pages through the volume-ranked list with a capped ``offset`` (Gamma's
-        API 422s on deep offsets). The highest-volume closed markets are the
-        most liquid and best-resolved, which is exactly what we want; capping
-        the offset is both safe and quality-positive. A volume cursor would be
-        needed to traverse the long tail -- not required here.
+        Pages by a **volume cursor** (``volume_num_max``) rather than ``offset``
+        -- Gamma 422s on deep offsets, but the volume cursor traverses the whole
+        long tail. Each page sets the cursor to the lowest volume seen, so we
+        descend by volume; we stop once volume falls below ``min_volume`` (those
+        markets wouldn't pass the quality sweep anyway). Dedupes by id.
 
         ``with_history=True`` pulls each kept market's intraday price curve from
         the CLOB timeseries endpoint (one extra request per market), giving the
@@ -242,25 +240,30 @@ class PolymarketCollector:
         scanned = 0
         drops: Counter = Counter()
         seen: set[str] = set()
-        # Never exceed the API's offset cap, regardless of caller's max_scan.
-        offset_cap = min(max(0, max_scan), self._MAX_OFFSET)
-        offset = 0
-        while len(out) < limit and offset <= offset_cap:
+        cursor: float | None = None  # volume_num_max
+        stagnant = 0
+        while len(out) < limit and scanned < max_scan:
+            params = {"closed": "true", "limit": self._PAGE,
+                      "order": "volumeNum", "ascending": "false"}
+            if cursor is not None:
+                params["volume_num_max"] = cursor
             try:
-                page = _get_json(
-                    f"{self.BASE}/markets",
-                    {"closed": "true", "limit": self._PAGE, "offset": offset,
-                     "order": "volumeNum", "ascending": "false"},
-                )
-            except Exception:  # noqa: BLE001 - hit the offset cap or a blip
+                page = _get_json(f"{self.BASE}/markets", params)
+            except Exception:  # noqa: BLE001 - transient/blip
                 break
             if not page:
                 break
+            new_in_page = 0
+            min_vol: float | None = None
             for m in page:
+                v = m.get("volumeNum")
+                if v is not None and (min_vol is None or v < min_vol):
+                    min_vol = v
                 mid = str(m.get("id"))
                 if mid in seen:
                     continue
                 seen.add(mid)
+                new_in_page += 1
                 scanned += 1
                 ex, reason = self._to_example(m, min_volume=min_volume)
                 if ex is None:
@@ -271,7 +274,20 @@ class PolymarketCollector:
                 out.append(ex)
                 if len(out) >= limit:
                     break
-            offset += self._PAGE
+            if len(out) >= limit:
+                break
+            # Descended below the quality volume floor -> remaining won't qualify.
+            if min_vol is None or min_vol < min_volume:
+                break
+            # Advance the volume cursor downward.
+            if new_in_page == 0:  # stuck on a tie cluster -> nudge past it
+                cursor = (cursor if cursor is not None else min_vol) - 1.0
+                stagnant += 1
+                if stagnant > 5:
+                    break
+            else:
+                cursor = min_vol
+                stagnant = 0
         self.last_stats = {
             "source": "polymarket", "scanned": scanned,
             "kept": len(out), "dropped": dict(drops),

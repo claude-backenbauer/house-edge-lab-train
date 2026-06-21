@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from src.economics.model import EconomicsInputs, EconomicsResult, compute_economics
 from src.models.candidate_market import CandidateMarket
 from src.models.platform_profile import get_platform_profile
+from src.scoring.market_scorer import MarketScorer, ScoreResult
 from src.simulation.monte_carlo import (
     SimulationConfig,
     SimulationResult,
@@ -29,34 +30,20 @@ class MarketAnalysis:
     validation: ValidationResult
     economics: EconomicsResult | None = None
     simulation: SimulationResult | None = None
+    lp_score: ScoreResult | None = None
     recommended_max_liquidity: float = 0.0
-    verdict: str = "blocked"  # allowed / risky / blocked
+    verdict: str = "blocked"  # create / risky / avoid / blocked
     extras: dict = field(default_factory=dict)
 
     @property
     def score(self) -> float:
-        """Ranking score: risk-adjusted expected profit (higher is better)."""
+        """Ranking score (higher is better): the LP attractiveness score."""
+        if self.lp_score is not None:
+            return float(self.lp_score.score)
         if self.simulation is None or not self.validation.allowed:
             return float("-inf")
         s = self.simulation
-        # Penalise probability of loss and tail risk.
-        return (
-            s.mean_profit
-            - 0.5 * abs(s.worst_5pct_profit)
-            - 100.0 * s.prob_loss
-        )
-
-
-def _verdict(validation: ValidationResult, sim: SimulationResult | None) -> str:
-    if not validation.allowed:
-        return "blocked"
-    if validation.risk_level is RiskLevel.HIGH:
-        return "risky"
-    if sim is not None and (sim.prob_loss > 0.4 or sim.mean_profit <= 0):
-        return "risky"
-    if validation.risk_level is RiskLevel.MEDIUM:
-        return "risky"
-    return "allowed"
+        return s.mean_profit - 0.5 * abs(s.worst_5pct_profit) - 100.0 * s.prob_loss
 
 
 def _recommended_max_liquidity(
@@ -106,14 +93,20 @@ def analyze_market(
         if run_simulation:
             simulation = simulate_market(market, sim_config)
 
-    verdict = _verdict(validation, simulation)
-    rec_liq = _recommended_max_liquidity(market, simulation)
+    # The market-selection scorer gives the decision-relevant verdict
+    # (create/risky/avoid) and recommended fees/liquidity from the fees-vs-
+    # adverse-selection economics, grounded in real-money data.
+    lp_score = MarketScorer().score(market)
+    verdict = lp_score.verdict
+    rec_liq = (lp_score.recommended_max_liquidity if validation.allowed
+               else _recommended_max_liquidity(market, simulation))
 
     return MarketAnalysis(
         market=market,
         validation=validation,
         economics=economics,
         simulation=simulation,
+        lp_score=lp_score,
         recommended_max_liquidity=rec_liq,
         verdict=verdict,
     )
@@ -158,16 +151,15 @@ def _assumptions_block(sim_config: SimulationConfig | None) -> str:
 
 
 def _analysis_row(a: MarketAnalysis) -> str:
+    lp = a.lp_score
     s = a.simulation
-    e = a.economics
-    mean = _fmt(s.mean_profit) if s else "n/a"
-    worst = _fmt(s.worst_5pct_profit) if s else "n/a"
+    score = f"{lp.score}" if lp else "n/a"
+    conf = lp.confidence if lp else "n/a"
+    rec_fees = f"{lp.recommended_creator_fee + lp.recommended_lp_fee:.1%}" if lp else "n/a"
     ploss = f"{s.prob_loss:.0%}" if s else "n/a"
-    fee_rev = _fmt(e.total_fee_revenue) if e else "n/a"
     return (
-        f"| {a.market.id} | {a.verdict} | {a.validation.risk_level.value} | "
-        f"{fee_rev} | {mean} | {worst} | {ploss} | "
-        f"{_fmt(a.recommended_max_liquidity)} |"
+        f"| {a.market.id} | **{a.verdict}** | {score} | {conf} | {rec_fees} | "
+        f"{ploss} | {_fmt(a.recommended_max_liquidity)} |"
     )
 
 
@@ -201,10 +193,10 @@ def build_report(
     out.append("")
     if ranked:
         out.append(
-            "| id | verdict | risk | exp. fee rev | mean profit | "
-            "worst 5% | P(loss) | rec. max liq |"
+            "| id | verdict | LP score | confidence | rec. fees | "
+            "P(loss) | rec. max liq |"
         )
-        out.append("|---|---|---|---|---|---|---|---|")
+        out.append("|---|---|---|---|---|---|---|")
         for a in ranked:
             out.append(_analysis_row(a))
     else:
@@ -224,6 +216,19 @@ def build_report(
                    f"(risk: {a.validation.risk_level.value})")
         out.append(f"- Creator fee: {m.creator_fee:.2%} | LP fee: {m.lp_fee:.2%} | "
                    f"Seeded liquidity: {_fmt(m.initial_liquidity)}")
+        if a.lp_score:
+            lp = a.lp_score
+            out.append(
+                f"- **LP decision:** {lp.verdict} (score {lp.score}/100, "
+                f"{lp.confidence} confidence) — adverse-selection "
+                f"{lp.adverse_selection_rate:.1%} of volume vs fees "
+                f"{lp.fee_rate:.1%} → net {lp.net_margin_rate:+.1%}"
+            )
+            out.append(
+                f"- **Recommended fees:** creator {lp.recommended_creator_fee:.1%}"
+                f" + LP {lp.recommended_lp_fee:.1%} "
+                f"(net {lp.net_margin_at_recommended:+.1%} at those fees)"
+            )
         if a.economics:
             e = a.economics
             be = _fmt(e.break_even_volume) if e.break_even_volume else "unreachable"

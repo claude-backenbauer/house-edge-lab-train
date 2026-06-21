@@ -29,6 +29,7 @@ from src.data.store import DatasetStore
 from src.models.candidate_market import CandidateMarket
 from src.predictors.base import BaselinePredictor
 from src.reporting.report import analyze_market, build_report, write_report
+from src.scoring.market_scorer import MarketScorer
 from src.simulation.monte_carlo import SimulationConfig, simulate_market
 from src.telemetry.tracker import TelemetryTracker
 from src.validation.validator import validate_market
@@ -123,6 +124,34 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(f"Wrote report to {out_path}")
     if args.stdout:
         print("\n" + report_md)
+    return 0
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    markets = load_markets(args.data)
+    scorer = MarketScorer()
+    results = [scorer.score(m) for m in markets]
+    # Best LP markets first.
+    order = {"create": 0, "risky": 1, "avoid": 2, "blocked": 3}
+    results.sort(key=lambda r: (order.get(r.verdict, 9), -r.score))
+    print(f"Scoring {len(markets)} market(s) for LP attractiveness "
+          f"(edge = fees beating adverse selection)\n")
+    for r in results:
+        print(f"[{r.verdict:7}] score {r.score:3}/100  {r.market_id}")
+        for reason in r.reasons:
+            print(f"            - {reason}")
+        if r.verdict != "blocked":
+            print(f"            > recommend: creator {r.recommended_creator_fee:.1%}"
+                  f" + LP {r.recommended_lp_fee:.1%}, "
+                  f"max liquidity {r.recommended_max_liquidity:,.0f}")
+        print()
+    create = sum(1 for r in results if r.verdict == "create")
+    print(f"Summary: {create} worth creating, "
+          f"{sum(1 for r in results if r.verdict=='risky')} risky, "
+          f"{sum(1 for r in results if r.verdict=='avoid')} avoid, "
+          f"{sum(1 for r in results if r.verdict=='blocked')} blocked.")
+    if args.json:
+        _maybe_write_json(args.json, [r.to_dict() for r in results])
     return 0
 
 
@@ -249,6 +278,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="run a predictor over markets")
     pr.add_argument("--telemetry", help="JSONL log to record predictions into")
     pr.set_defaults(func=cmd_predict)
+
+    sc = sub.add_parser("score", parents=[common],
+                        help="score markets for LP attractiveness (fee edge)")
+    sc.add_argument("--json", help="optional path to write JSON results")
+    sc.set_defaults(func=cmd_score)
 
     so = sub.add_parser("sources", help="list recommended data sources")
     so.set_defaults(func=cmd_sources)

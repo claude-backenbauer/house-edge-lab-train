@@ -448,6 +448,46 @@ class TestDataQuality(unittest.TestCase):
         self.assertEqual(reason, "meta-market")
 
 
+class TestMarketScorer(unittest.TestCase):
+    def _m(self, **over):
+        base = dict(
+            id="s1", question="Will the home team win the championship final?",
+            description="objective", category="sports", outcomes=["Yes", "No"],
+            close_time="2026-12-30T00:00:00Z", event_time="2026-12-31T00:00:00Z",
+            resolution_source="official league result", platform="polkamarkets",
+            creator_fee=0.02, lp_fee=0.04, initial_liquidity=5000,
+            expected_volume=200000)
+        base.update(over)
+        return CandidateMarket.from_dict(base)
+
+    def test_blocked_market_scored_blocked(self):
+        from src.scoring.market_scorer import MarketScorer
+        r = MarketScorer().score(self._m(resolution_source=""))
+        self.assertEqual(r.verdict, "blocked")
+        self.assertEqual(r.score, 0)
+
+    def test_sports_safer_than_economics(self):
+        # Same fees/volume: sports has lower measured adverse selection.
+        from src.scoring.market_scorer import MarketScorer
+        sc = MarketScorer()
+        sports = sc.score(self._m(category="sports"))
+        econ = sc.score(self._m(
+            category="economics",
+            question="Will GDP growth exceed 3% this year per official data?"))
+        self.assertLess(sports.adverse_selection_rate, econ.adverse_selection_rate)
+        self.assertGreaterEqual(sports.score, econ.score)
+
+    def test_verdict_and_recommendations(self):
+        from src.scoring.market_scorer import MarketScorer
+        r = MarketScorer().score(self._m())
+        self.assertIn(r.verdict, ("create", "risky", "avoid"))
+        self.assertGreaterEqual(r.recommended_lp_fee, 0.0)
+        # net margin = fees - adverse - ops
+        self.assertAlmostEqual(
+            r.net_margin_rate,
+            r.fee_rate - r.adverse_selection_rate - 0.002, places=4)
+
+
 class TestPolymarketHistory(unittest.TestCase):
     """CLOB price-history parsing/downsampling -- no real network."""
 

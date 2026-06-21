@@ -26,6 +26,14 @@ from src.validation.validator import validate_market
 # --- Data-measured: adverse-selection magnitude by category -----------------
 # avg |settle - early price| over 2,900 resolved markets (Manifold+Polymarket).
 # Higher = the price moves more after you provide liquidity = more toxic flow.
+#
+# ⚠️ PROVISIONAL. A pressure test (random + platform splits) showed these
+# numbers are NOT stable across platforms: play-money (Manifold) and real-money
+# (Polymarket) disagree sharply per category (e.g. sports 0.31 vs 0.06), and
+# several categories have very little real-money data. Treat the values as a
+# rough prior, not validated truth. For a real-money platform, the real-money
+# numbers matter more -- but we don't yet have enough real-money data per
+# category. See CATEGORY_CONFIDENCE and STRATEGY.md.
 CATEGORY_ADVERSE_MAGNITUDE: dict[str, float] = {
     "sports": 0.202,
     "politics": 0.231,
@@ -37,6 +45,19 @@ CATEGORY_ADVERSE_MAGNITUDE: dict[str, float] = {
     "economics": 0.294,
 }
 DEFAULT_ADVERSE_MAGNITUDE = 0.262  # overall mean
+
+# How much to trust each category's number, from the pressure test (sample size
+# + cross-platform agreement). None are "high" yet -- needs more real-money data.
+CATEGORY_CONFIDENCE: dict[str, str] = {
+    "politics": "medium",     # decent n both platforms, same ballpark
+    "other": "medium",        # huge n but heterogeneous bucket
+    "sports": "low",          # flips hard across platforms (0.31 vs 0.06)
+    "economics": "low",       # flips (0.35 vs 0.16)
+    "geopolitics": "low",     # flips (0.25 vs 0.37)
+    "tech": "low",            # almost no real-money data
+    "crypto": "low",          # almost no real-money data
+    "science": "low",         # tiny sample (n=37), no real-money data
+}
 
 # --- Heuristic: how sharp-dominated each category's flow tends to be ---------
 # (Not data-measured -- a prior. Crypto/econ draw pros; sports draws fans.)
@@ -74,6 +95,7 @@ class ScoreResult:
     net_margin_at_recommended: float
     recommended_max_liquidity: float
     reasons: list[str] = field(default_factory=list)
+    confidence: str = "low"  # how much to trust the category's adverse-sel number
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -178,6 +200,13 @@ class MarketScorer:
                 "adverse selection too high to clear even at max platform fees"
             )
 
+        confidence = CATEGORY_CONFIDENCE.get(cat, "low")
+        if confidence != "medium":
+            reasons.append(
+                f"confidence in '{cat}' adverse-selection number is {confidence} "
+                "(provisional — varies by platform / thin real-money data)"
+            )
+
         # 0-100 score from the best achievable net margin (4% net == 100).
         best_net = max(net_rate, net_at_rec)
         score = int(max(0, min(100, round(best_net / 0.04 * 100))))
@@ -190,4 +219,5 @@ class MarketScorer:
             recommended_creator_fee=rec_creator, recommended_lp_fee=rec_lp,
             net_margin_at_recommended=round(net_at_rec, 4),
             recommended_max_liquidity=rec_liq, reasons=reasons,
+            confidence=confidence,
         )

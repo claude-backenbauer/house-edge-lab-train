@@ -9,10 +9,54 @@ Returns a fixed-length list of floats per example, plus the label.
 
 from __future__ import annotations
 
+import hashlib
 import math
+import re
 from datetime import datetime, timedelta, timezone
 
 from src.data.schema import TrainingExample
+
+
+# --- Question-text features -------------------------------------------------
+# We turn the question wording into numbers with a "hashing bag-of-words": each
+# word is hashed into one of TEXT_HASH_DIM buckets and counted. No external
+# model or API -- just a stable, dependency-free way to let the model learn
+# from words (team names, "rate cut", "win", "before 2027", etc.).
+#
+# MEASURED: on the current ~334-market dataset, turning this on *hurts* (it
+# overfits -- 0 dims = 78% val acc, 64 dims = 72%). The model needs far more
+# data before word features pay off. So it ships OFF (0); raise it once the
+# dataset is large (rough rule of thumb: hundreds of markets per text bucket).
+TEXT_HASH_DIM = 0
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOPWORDS = {
+    "the", "a", "an", "will", "be", "is", "are", "to", "of", "in", "on", "by",
+    "for", "and", "or", "at", "this", "that", "it", "as", "with", "from",
+    "before", "after", "than", "have", "has", "do", "does", "did", "any",
+}
+
+
+def _stable_hash(token: str) -> int:
+    """Deterministic hash (unlike Python's per-process-randomized hash())."""
+    return int.from_bytes(hashlib.md5(token.encode("utf-8")).digest()[:4], "big")
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in _TOKEN_RE.findall((text or "").lower())
+            if len(t) > 1 and t not in _STOPWORDS]
+
+
+def text_features(text: str, dim: int = TEXT_HASH_DIM) -> list[float]:
+    """Hashing bag-of-words vector for a question (length ``dim``)."""
+    if dim <= 0:
+        return []  # text features disabled
+    vec = [0.0] * dim
+    toks = _tokens(text)
+    for t in toks:
+        vec[_stable_hash(t) % dim] += 1.0
+    total = sum(vec) or 1.0
+    return [v / total for v in vec]  # normalize so length doesn't dominate
 
 
 # --- Leakage guard ----------------------------------------------------------
@@ -44,6 +88,7 @@ FEATURE_NAMES = (
         "price_early_drift",     # movement within the early window only
         "price_early_volatility",  # volatility within the early window only
     ]
+    + [f"text_{i}" for i in range(TEXT_HASH_DIM)]  # hashed question words
 )
 
 
@@ -125,7 +170,7 @@ def featurize(ex: TrainingExample) -> list[float]:
         last,
         drift,
         vol,
-    ]
+    ] + text_features(ex.question)
 
 
 def label_yes(ex: TrainingExample) -> float | None:

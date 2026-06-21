@@ -448,5 +448,31 @@ class TestDataQuality(unittest.TestCase):
         self.assertEqual(reason, "meta-market")
 
 
+class TestPolymarketHistory(unittest.TestCase):
+    """CLOB price-history parsing/downsampling -- no real network."""
+
+    def test_price_history_parse_and_downsample(self):
+        from src.data import collectors as C
+        canned = {"history": [{"t": 1700000000 + i * 3600, "p": 0.2 + i * 0.001}
+                              for i in range(200)]}
+        orig = C._get_json
+        C._get_json = lambda url, params=None: canned  # type: ignore
+        try:
+            pts = C.PolymarketCollector()._price_history(
+                {"clobTokenIds": '["123","456"]'}, cap=50)
+        finally:
+            C._get_json = orig
+        self.assertEqual(len(pts), 50)  # downsampled to cap
+        self.assertEqual(len(pts[0].prices), 2)
+        self.assertAlmostEqual(pts[0].prices[0] + pts[0].prices[1], 1.0, places=6)
+        self.assertTrue(pts[0].t)  # timestamp populated
+
+    def test_price_history_empty_without_tokens(self):
+        from src.data.collectors import PolymarketCollector
+        self.assertEqual(
+            PolymarketCollector()._price_history({"clobTokenIds": "[]"}), [])
+        self.assertEqual(PolymarketCollector()._price_history({}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

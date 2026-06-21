@@ -142,6 +142,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.source == "manifold":
         kwargs["with_history"] = args.history
         kwargs["min_volume"] = args.min_volume
+    elif args.source == "polymarket":
+        kwargs["with_history"] = args.history
     examples = collector.collect(**kwargs)
 
     if args.fresh and os.path.exists(args.out):

@@ -216,6 +216,7 @@ class PolymarketCollector:
     """
 
     BASE = "https://gamma-api.polymarket.com"
+    CLOB = "https://clob.polymarket.com"  # price-history timeseries lives here
     name = "polymarket"
 
     # Gamma rejects offsets past a few thousand (HTTP 422). Stay safely under it.
@@ -223,7 +224,8 @@ class PolymarketCollector:
     _PAGE = 100
 
     def collect(self, limit: int = 50, max_scan: int = 2000,
-                min_volume: float = 1000.0) -> list[TrainingExample]:
+                min_volume: float = 1000.0,
+                with_history: bool = False) -> list[TrainingExample]:
         """Collect closed binary markets, highest-volume first.
 
         Pages through the volume-ranked list with a capped ``offset`` (Gamma's
@@ -231,6 +233,10 @@ class PolymarketCollector:
         most liquid and best-resolved, which is exactly what we want; capping
         the offset is both safe and quality-positive. A volume cursor would be
         needed to traverse the long tail -- not required here.
+
+        ``with_history=True`` pulls each kept market's intraday price curve from
+        the CLOB timeseries endpoint (one extra request per market), giving the
+        honest early-price features the model uses.
         """
         out: list[TrainingExample] = []
         scanned = 0
@@ -260,6 +266,8 @@ class PolymarketCollector:
                 if ex is None:
                     drops[reason] += 1
                     continue
+                if with_history:
+                    ex.price_series = self._price_history(m)
                 out.append(ex)
                 if len(out) >= limit:
                     break
@@ -269,6 +277,43 @@ class PolymarketCollector:
             "kept": len(out), "dropped": dict(drops),
         }
         return out
+
+    def _price_history(self, m: dict, cap: int = 80,
+                       fidelity: int = 720) -> list[PricePoint]:
+        """Fetch the 'Yes' outcome's price curve from the CLOB timeseries.
+
+        Returns a downsampled list of PricePoints (prices=[yes, 1-yes]).
+        ``fidelity`` is the resolution in minutes; ``cap`` bounds stored points.
+        """
+        try:
+            tokens = json.loads(m.get("clobTokenIds", "[]"))
+        except (ValueError, TypeError):
+            return []
+        if not tokens:
+            return []
+        try:
+            resp = _get_json(
+                f"{self.CLOB}/prices-history",
+                {"market": str(tokens[0]), "interval": "max",
+                 "fidelity": fidelity},
+            )
+        except Exception:  # noqa: BLE001 - history is best-effort
+            return []
+        hist = resp.get("history", []) if isinstance(resp, dict) else []
+        pts: list[PricePoint] = []
+        for row in hist:
+            p = row.get("p")
+            if p is None:
+                continue
+            t = row.get("t")
+            iso = _ms_to_iso(t * 1000) if t else ""  # CLOB timestamps are seconds
+            p = float(p)
+            pts.append(PricePoint(t=iso or "", prices=[p, 1.0 - p], volume=0.0))
+        # Downsample evenly, but always keep the first point (earliest signal).
+        if len(pts) > cap:
+            step = len(pts) / cap
+            pts = [pts[int(i * step)] for i in range(cap)]
+        return pts
 
     @staticmethod
     def _category(m: dict) -> str:

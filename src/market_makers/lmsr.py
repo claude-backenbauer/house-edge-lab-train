@@ -151,11 +151,15 @@ class LMSRMarket:
         bounded below by -max_loss; fees are added on top as pure profit.
         """
         cash_collected = self._cost() - self._c0
-        payout = self.q_yes if outcome_yes else self.q_no
-        # Subtract the initial winning shares we "seeded" (not sold to traders).
-        seeded = (self.b * math.log(  # initial q on the winning side
-            (self.p_init if outcome_yes else 1 - self.p_init)
-            / (1 - (self.p_init if outcome_yes else 1 - self.p_init))
-        )) if outcome_yes else 0.0
-        traded_payout = max(0.0, payout - max(0.0, seeded))
-        return cash_collected - traded_payout + self.collected_fees
+        # Initial seeded quantities (set the starting price). q_no seed is 0;
+        # q_yes seed is b*logit(p_init) and may be negative if p_init < 0.5.
+        p = min(max(self.p_init, 1e-6), 1 - 1e-6)
+        q_yes0 = self.b * math.log(p / (1 - p))
+        q_no0 = 0.0
+        # Traders are net-long the (quantity - seed) of the winning outcome;
+        # the maker pays them 1 per such share at resolution.
+        if outcome_yes:
+            traders_winning_shares = self.q_yes - q_yes0
+        else:
+            traders_winning_shares = self.q_no - q_no0
+        return cash_collected - traders_winning_shares + self.collected_fees

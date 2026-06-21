@@ -49,6 +49,7 @@ class RunResult:
     max_drawdown: float
     final_price: float
     outcome_yes: bool
+    uninformed_pnl: float = 0.0
 
 
 @dataclass
@@ -62,7 +63,8 @@ class SimulationResult:
     prob_loss: float
     expected_volume: float
     fee_revenue: float  # mean fees across runs
-    adverse_selection_loss: float  # mean across runs
+    adverse_selection_loss: float  # mean across runs (loss to informed flow)
+    uninformed_pnl: float = 0.0  # mean maker P&L from noise/momentum/fan flow
     std_profit: float = 0.0
     best_profit: float = 0.0
     extras: dict = field(default_factory=dict)
@@ -79,6 +81,7 @@ class SimulationResult:
             "expected_volume": self.expected_volume,
             "fee_revenue": self.fee_revenue,
             "adverse_selection_loss": self.adverse_selection_loss,
+            "uninformed_pnl": self.uninformed_pnl,
             "std_profit": self.std_profit,
             "best_profit": self.best_profit,
             **self.extras,
@@ -121,7 +124,9 @@ def _single_run(
     price_history: list[float] = [mm.price_yes()]
     peak_value = mark_to_market()  # mark-to-market P&L peak, for drawdown
     max_dd = 0.0
-    adverse_loss = 0.0
+    # Record every trade so we can decompose maker P&L by trader type at the
+    # end -- an exact accounting, not a heuristic.
+    trades: list[tuple] = []  # (trader_type, side, shares, cost)
 
     for _ in range(cfg.steps):
         rng.shuffle(population)
@@ -139,17 +144,10 @@ def _single_run(
             # Convert notional into a target-belief trade, capped by size.
             belief = trader.belief(true_p, mm.price_yes(), price_history, rng)
             max_shares = notional  # 1 unit notional ~ 1 share near mid
-            before_price = mm.price_yes()
             rec = mm.trade_to_belief(belief, max_shares)
-
-            # Track adverse selection: informed/arb traders moving price toward
-            # truth are extracting value from the maker.
-            if trader.trader_type in (TraderType.INFORMED, TraderType.ARBITRAGE):
-                moved_toward_truth = (true_p - before_price) * (
-                    mm.price_yes() - before_price
-                )
-                if moved_toward_truth > 0:
-                    adverse_loss += abs(rec.get("cost", 0.0)) * 0.5
+            if rec.get("side") and rec.get("shares", 0.0) > 0:
+                trades.append((trader.trader_type, rec["side"],
+                               rec["shares"], rec.get("cost", 0.0)))
 
             price_history.append(mm.price_yes())
             mtm = mark_to_market()
@@ -159,11 +157,25 @@ def _single_run(
     outcome_yes = rng.random() < true_p
     pnl = mm.maker_pnl(outcome_yes)
 
+    # Decompose the trading P&L (excl. fees) by trader type. For each trade the
+    # maker received `cost` and owes `shares` if that side won.
+    winner = "yes" if outcome_yes else "no"
+    adverse_loss = 0.0      # maker's loss to informed/arbitrage flow
+    uninformed_pnl = 0.0    # maker's P&L from noise/momentum/fan flow
+    for ttype, side, shares, cost in trades:
+        trade_maker_pnl = cost - (shares if side == winner else 0.0)
+        if ttype in (TraderType.INFORMED, TraderType.ARBITRAGE):
+            adverse_loss -= trade_maker_pnl  # +ve = maker lost to sharps
+        else:
+            uninformed_pnl += trade_maker_pnl
+    # Identity (holds by construction): pnl == fees + uninformed_pnl - adverse_loss
+
     return RunResult(
         pnl=pnl,
         volume=mm.volume,
         fees=mm.collected_fees,
         adverse_selection_loss=adverse_loss,
+        uninformed_pnl=uninformed_pnl,
         max_drawdown=max_dd,
         final_price=mm.price_yes(),
         outcome_yes=outcome_yes,
@@ -183,6 +195,7 @@ def simulate_market(
     volumes: list[float] = []
     fees: list[float] = []
     adverse: list[float] = []
+    uninformed: list[float] = []
     drawdowns: list[float] = []
 
     for _ in range(cfg.runs):
@@ -193,6 +206,7 @@ def simulate_market(
         volumes.append(result.volume)
         fees.append(result.fees)
         adverse.append(result.adverse_selection_loss)
+        uninformed.append(result.uninformed_pnl)
         drawdowns.append(result.max_drawdown)
 
     profits_sorted = sorted(profits)
@@ -211,6 +225,7 @@ def simulate_market(
         expected_volume=statistics.fmean(volumes),
         fee_revenue=statistics.fmean(fees),
         adverse_selection_loss=statistics.fmean(adverse),
+        uninformed_pnl=statistics.fmean(uninformed),
         std_profit=statistics.pstdev(profits) if len(profits) > 1 else 0.0,
         best_profit=max(profits) if profits else 0.0,
     )

@@ -205,6 +205,14 @@ class TestSimulation(unittest.TestCase):
         self.assertGreaterEqual(a.expected_volume, 0.0)
         self.assertLessEqual(a.worst_5pct_profit, a.mean_profit + 1e-6)
 
+    def test_pnl_decomposition_reconciles(self):
+        # mean_profit must equal fees + uninformed_pnl - adverse_selection_loss.
+        m = _good_market()
+        s = simulate_market(m, SimulationConfig(runs=60, steps=12, seed=3))
+        reconstructed = (s.fee_revenue + s.uninformed_pnl
+                         - s.adverse_selection_loss)
+        self.assertAlmostEqual(s.mean_profit, reconstructed, places=4)
+
 
 class TestForecaster(unittest.TestCase):
     def test_probabilities_normalised(self):

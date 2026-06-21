@@ -24,39 +24,36 @@ from src.validation.validator import validate_market
 
 
 # --- Data-measured: adverse-selection magnitude by category -----------------
-# avg |settle - early price| over 2,900 resolved markets (Manifold+Polymarket).
-# Higher = the price moves more after you provide liquidity = more toxic flow.
-#
-# ⚠️ PROVISIONAL. A pressure test (random + platform splits) showed these
-# numbers are NOT stable across platforms: play-money (Manifold) and real-money
-# (Polymarket) disagree sharply per category (e.g. sports 0.31 vs 0.06), and
-# several categories have very little real-money data. Treat the values as a
-# rough prior, not validated truth. For a real-money platform, the real-money
-# numbers matter more -- but we don't yet have enough real-money data per
-# category. See CATEGORY_CONFIDENCE and STRATEGY.md.
+# avg |settle - early price| measured on REAL-MONEY markets (Polymarket, n=2,500
+# with price history). Higher = the price moves more after you provide
+# liquidity = more toxic flow. These supersede the earlier combined (play+real)
+# numbers: a pressure test showed play-money and real-money disagree sharply,
+# and a creator/LP operates in the real-money regime. Most categories now have
+# large samples and tight confidence intervals (see CATEGORY_CONFIDENCE).
+# Notable real-money correction: economics is fairly *safe* (0.175), not the
+# worst as the combined data wrongly suggested.
 CATEGORY_ADVERSE_MAGNITUDE: dict[str, float] = {
-    "sports": 0.202,
-    "politics": 0.231,
-    "science": 0.241,
-    "geopolitics": 0.267,
-    "other": 0.277,
-    "tech": 0.288,
-    "crypto": 0.288,
-    "economics": 0.294,
+    "sports": 0.090,       # safest; tight CI [0.076, 0.104], n=504
+    "economics": 0.175,    # n=98 (medium)
+    "politics": 0.177,     # n=621
+    "crypto": 0.254,       # n=359
+    "tech": 0.254,         # n=81 (medium)
+    "geopolitics": 0.269,  # n=304
+    "other": 0.303,        # riskiest bucket; n=525
+    # science: no real-money data -> falls back to DEFAULT.
 }
-DEFAULT_ADVERSE_MAGNITUDE = 0.262  # overall mean
+DEFAULT_ADVERSE_MAGNITUDE = 0.211  # real-money overall mean
 
-# How much to trust each category's number, from the pressure test (sample size
-# + cross-platform agreement). None are "high" yet -- needs more real-money data.
+# Confidence per category, from real-money sample size + bootstrap CI width.
 CATEGORY_CONFIDENCE: dict[str, str] = {
-    "politics": "medium",     # decent n both platforms, same ballpark
-    "other": "medium",        # huge n but heterogeneous bucket
-    "sports": "low",          # flips hard across platforms (0.31 vs 0.06)
-    "economics": "low",       # flips (0.35 vs 0.16)
-    "geopolitics": "low",     # flips (0.25 vs 0.37)
-    "tech": "low",            # almost no real-money data
-    "crypto": "low",          # almost no real-money data
-    "science": "low",         # tiny sample (n=37), no real-money data
+    "sports": "high",        # n=504, tight CI
+    "politics": "high",      # n=621
+    "crypto": "high",        # n=359
+    "geopolitics": "high",   # n=304
+    "other": "high",         # n=525
+    "economics": "medium",   # n=98
+    "tech": "medium",        # n=81
+    "science": "low",        # no real-money data
 }
 
 # --- Heuristic: how sharp-dominated each category's flow tends to be ---------
@@ -201,10 +198,15 @@ class MarketScorer:
             )
 
         confidence = CATEGORY_CONFIDENCE.get(cat, "low")
-        if confidence != "medium":
+        if confidence == "low":
             reasons.append(
-                f"confidence in '{cat}' adverse-selection number is {confidence} "
-                "(provisional — varies by platform / thin real-money data)"
+                f"⚠ low confidence: thin real-money data for '{cat}' — "
+                "treat its number as a rough guess"
+            )
+        else:
+            reasons.append(
+                f"{confidence}-confidence adverse-selection number for '{cat}' "
+                "(measured on real-money markets)"
             )
 
         # 0-100 score from the best achievable net margin (4% net == 100).

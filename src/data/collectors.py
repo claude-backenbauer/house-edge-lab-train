@@ -218,21 +218,43 @@ class PolymarketCollector:
     BASE = "https://gamma-api.polymarket.com"
     name = "polymarket"
 
-    def collect(self, limit: int = 50, max_scan: int = 800,
+    # Gamma rejects offsets past a few thousand (HTTP 422). Stay safely under it.
+    _MAX_OFFSET = 2000
+    _PAGE = 100
+
+    def collect(self, limit: int = 50, max_scan: int = 2000,
                 min_volume: float = 1000.0) -> list[TrainingExample]:
+        """Collect closed binary markets, highest-volume first.
+
+        Pages through the volume-ranked list with a capped ``offset`` (Gamma's
+        API 422s on deep offsets). The highest-volume closed markets are the
+        most liquid and best-resolved, which is exactly what we want; capping
+        the offset is both safe and quality-positive. A volume cursor would be
+        needed to traverse the long tail -- not required here.
+        """
         out: list[TrainingExample] = []
-        offset = 0
         scanned = 0
         drops: Counter = Counter()
-        while len(out) < limit and offset < max_scan:
-            page = _get_json(
-                f"{self.BASE}/markets",
-                {"closed": "true", "limit": 100, "offset": offset,
-                 "order": "volume", "ascending": "false"},
-            )
+        seen: set[str] = set()
+        # Never exceed the API's offset cap, regardless of caller's max_scan.
+        offset_cap = min(max(0, max_scan), self._MAX_OFFSET)
+        offset = 0
+        while len(out) < limit and offset <= offset_cap:
+            try:
+                page = _get_json(
+                    f"{self.BASE}/markets",
+                    {"closed": "true", "limit": self._PAGE, "offset": offset,
+                     "order": "volumeNum", "ascending": "false"},
+                )
+            except Exception:  # noqa: BLE001 - hit the offset cap or a blip
+                break
             if not page:
                 break
             for m in page:
+                mid = str(m.get("id"))
+                if mid in seen:
+                    continue
+                seen.add(mid)
                 scanned += 1
                 ex, reason = self._to_example(m, min_volume=min_volume)
                 if ex is None:
@@ -241,7 +263,7 @@ class PolymarketCollector:
                 out.append(ex)
                 if len(out) >= limit:
                     break
-            offset += 100
+            offset += self._PAGE
         self.last_stats = {
             "source": "polymarket", "scanned": scanned,
             "kept": len(out), "dropped": dict(drops),
